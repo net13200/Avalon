@@ -11,9 +11,15 @@ import { createGame, reduce, validateSetup, RuleError } from './game.js';
 import { viewFor } from './view.js';
 import { DEFAULT_OPTIONS, MAX_PLAYERS, MIN_PLAYERS } from './rules.js';
 
+/**
+ * Bumped whenever messages change incompatibly. Phones can run different cached
+ * versions of the app after an update, so a mismatch asks the player to reload.
+ */
+export const PROTOCOL = 1;
+
 /** Messages a client sends to the host. */
 export const C2H = Object.freeze({
-  HELLO: 'hello', // { pid, secret, name } - join, or rejoin the same seat
+  HELLO: 'hello', // { v, pid, secret, name } - join, or rejoin the same seat
   BYE: 'bye', // the connection closed; the player keeps their seat
   LEAVE: 'leave', // the player left on purpose; removed if the game has not started
   ACTION: 'action', // { action } - a game action; playerId is filled in by the host
@@ -167,8 +173,13 @@ export class HostSession {
     return this.#broadcast();
   }
 
-  #hello(connId, { pid, secret, name }) {
+  #hello(connId, { v, pid, secret, name }) {
     const reject = (code, message) => this.send(connId, { type: H2C.REJECTED, code, message });
+    if (v !== PROTOCOL) {
+      return reject('version-mismatch', v > PROTOCOL
+        ? "The host's app is out of date. The host should reload the page, then you can rejoin."
+        : 'Your app is out of date. Reload the page, then join again.');
+    }
     if (typeof pid !== 'string' || !ID_PATTERN.test(pid) || typeof secret !== 'string' || !secret) {
       return reject('bad-hello', 'This device sent an invalid request.');
     }

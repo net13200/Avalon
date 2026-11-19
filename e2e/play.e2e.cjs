@@ -138,6 +138,107 @@ async function playGame(browser, base, n, { lady, shots, netParams, reload, labe
   return { winner, phases: [...seen] };
 }
 
+/** Opens a 5-player lobby and returns its pages; seat 0 hosts. */
+async function openLobby(browser, base, netParams, prefix) {
+  const context = await browser.newContext({ viewport: { width: 390, height: 844 } });
+  await context.route(/fonts\.(googleapis|gstatic)\.com/, (r) => r.abort());
+  // Lets a test cut a page's WebRTC traffic in both directions, as when a phone loses
+  // its network, without the connection reporting that it closed.
+  await context.addInitScript(() => {
+    const proto = RTCDataChannel.prototype;
+    const send = proto.send;
+    proto.send = function (data) {
+      if (!window.__cut) send.call(this, data);
+    };
+    const desc = Object.getOwnPropertyDescriptor(proto, 'onmessage');
+    Object.defineProperty(proto, 'onmessage', {
+      configurable: true,
+      get() { return desc.get.call(this); },
+      set(fn) { desc.set.call(this, fn && ((e) => { if (!window.__cut) fn.call(this, e); })); },
+    });
+  });
+  const room = randomRoom();
+  const pages = [];
+  for (let i = 0; i < 5; i++) {
+    const p = await context.newPage();
+    const q = new URLSearchParams({ room, pid: `${prefix}-${room}-${i}`, name: NAMES[i], ...netParams });
+    if (i === 0) q.set('host', '1');
+    await p.goto(`${base}/index.html?${q}`);
+    pages.push(p);
+  }
+  await pages[0].waitForSelector('[data-act=start]:not([disabled])', { timeout: 30000 });
+  return { context, pages, room };
+}
+
+/** Cuts or restores a page's WebRTC traffic. */
+const setCut = (page, cut) => page.evaluate((c) => { window.__cut = c; }, cut);
+
+const offlineCount = (page) => page.$$eval('.player.offline, .chip.offline', (els) => els.length);
+
+async function droppedConnections(browser, base, netParams) {
+  const { context, pages } = await openLobby(browser, base, netParams, 'z');
+  const [host, , sleeper] = pages;
+  await host.click('[data-act=start]');
+  for (const p of pages) await p.waitForSelector('.quests');
+
+  // A player's phone loses its network: the host marks them offline within seconds.
+  const t0 = Date.now();
+  await setCut(sleeper, true);
+  await host.waitForFunction(() => document.querySelectorAll('.chip.offline').length === 1, null, { timeout: 25000 });
+  const noticed = (Date.now() - t0) / 1000;
+  await setCut(sleeper, false);
+  await host.waitForFunction(() => document.querySelectorAll('.chip.offline').length === 0, null, { timeout: 40000 });
+  await sleeper.waitForSelector('.quests:not(:has(+ .status))');
+  console.log(`   a player who lost their network was marked offline after ${noticed.toFixed(1)} s, and rejoined when it came back`);
+
+  // The host's phone loses its network: players see that the host is gone, then everything resumes.
+  await setCut(host, true);
+  await pages[1].waitForSelector('text=Lost the host', { timeout: 25000 });
+  await setCut(host, false);
+  for (const p of pages.slice(1)) await p.waitForSelector('.quests:not(:has(+ .status))', { timeout: 40000 });
+  await host.waitForFunction(() => document.querySelectorAll('.chip.offline').length === 0, null, { timeout: 40000 });
+  console.log('   the host lost its network: players saw "Lost the host", then all reconnected');
+  assert.equal(await offlineCount(host), 0);
+  await context.close();
+}
+
+async function versionMismatch(browser, base, netParams) {
+  const { context, pages, room } = await openLobby(browser, base, netParams, 'v');
+  // An outdated phone: its own browser, serving it a host.js with an older protocol version.
+  const oldContext = await browser.newContext();
+  await oldContext.route(/fonts\.(googleapis|gstatic)\.com/, (r) => r.abort());
+  await oldContext.route('**/src/host.js', async (route) => {
+    const body = (await (await route.fetch()).text()).replace(/export const PROTOCOL = \d+;/, 'export const PROTOCOL = 0;');
+    await route.fulfill({ body, contentType: 'text/javascript' });
+  });
+  const old = await oldContext.newPage();
+  await old.goto(`${base}/index.html?${new URLSearchParams({ room, pid: `v-old-${room}`, name: 'Old', sw: '0', ...netParams })}`);
+  await old.waitForSelector('text=Your app is out of date', { timeout: 30000 });
+  await oldContext.close();
+  assert.equal(await pages[0].$$eval('.players li', (els) => els.length), 5);
+  await context.close();
+}
+
+async function installable(browser, base) {
+  const context = await browser.newContext();
+  await context.route(/fonts\.(googleapis|gstatic)\.com/, (r) => r.abort());
+  const page = await context.newPage();
+  await page.goto(`${base}/index.html`);
+  await page.waitForFunction(async () => (await navigator.serviceWorker.ready).active?.state === 'activated');
+  const manifest = await (await page.request.get(`${base}/manifest.webmanifest`)).json();
+  assert.equal(manifest.display, 'standalone');
+  for (const icon of manifest.icons) assert.equal((await page.request.get(`${base}/${icon.src}`)).status(), 200, icon.src);
+  // Reload with no network: the app still opens from the service worker's cache.
+  await page.reload();
+  await page.waitForFunction(() => navigator.serviceWorker.controller);
+  await context.setOffline(true);
+  await page.reload();
+  await page.waitForSelector('[data-act=host]');
+  await page.goto(`${base}/index.html?join=ABCD`);
+  await page.waitForSelector('input[name=code][value=ABCD]');
+  await context.close();
+}
+
 async function strangerCannotJoin(browser, base, netParams) {
   const context = await browser.newContext();
   await context.route(/fonts\.(googleapis|gstatic)\.com/, (r) => r.abort());
@@ -171,6 +272,8 @@ async function strangerCannotJoin(browser, base, netParams) {
   const browser = await chromium.launch({ args: ['--disable-features=WebRtcHideLocalIpsWithMdns'] });
   let signal = null;
   try {
+    await installable(browser, base);
+    console.log('ok: installable, and opens offline from the service worker cache');
     for (const net of modes) {
       let netParams = { net: 'local' };
       if (net === 'peer') {
@@ -186,6 +289,12 @@ async function strangerCannotJoin(browser, base, netParams) {
       }
       await strangerCannotJoin(browser, base, netParams);
       console.log(`ok ${net}: a stranger opening the join link mid-game is turned away`);
+      if (net === 'peer') {
+        await droppedConnections(browser, base, netParams);
+        console.log('ok peer: dropped connections are detected and recover');
+        await versionMismatch(browser, base, netParams);
+        console.log('ok peer: an outdated app is asked to reload');
+      }
     }
   } finally {
     await browser.close();

@@ -6,7 +6,7 @@
 //   ?signal=host:port    use a self-run PeerJS server instead of the public one
 //   ?room=ABCD[&host=1]&pid=…&name=…   join or host straight away (dev table, tests)
 
-import { HostSession, C2H, H2C } from '../host.js';
+import { HostSession, C2H, H2C, PROTOCOL } from '../host.js';
 import { ACTIONS } from '../game.js';
 import { localHostTransport, localClientTransport } from '../net/local.js';
 import { peerHostTransport, peerClientTransport } from '../net/peer.js';
@@ -84,6 +84,9 @@ const app = {
 let conn = null; // { send(msg), close(), forget(), reconnectNow() }
 let toastTimer = null;
 const sessionKey = `avalon.session.${pid}`;
+// A saved room is rejoined automatically on the next visit, but not days later.
+const SESSION_MAX_AGE = 12 * 60 * 60 * 1000;
+const saveSession = (room, host) => store.set(sessionKey, { room, host, at: Date.now() });
 
 function update(changes = {}) {
   Object.assign(app, changes);
@@ -121,7 +124,7 @@ function onHostMessage(msg) {
   }
 }
 
-const hello = () => ({ type: C2H.HELLO, pid, secret, name: app.name });
+const hello = () => ({ type: C2H.HELLO, v: PROTOCOL, pid, secret, name: app.name });
 
 /** Host a room. `resumed` means this device hosted it before (e.g. a reload). */
 function hostRoom(room, resumed = false) {
@@ -162,8 +165,9 @@ function hostRoom(room, resumed = false) {
     forget: () => { session.end(); store.remove(snapKey); },
     reconnectNow: () => {},
   };
-  store.set(sessionKey, { room, host: true });
+  saveSession(room, true);
   update({ room, isHost: true, joinLink: joinLink(room), rejected: null, netStatus: 'connecting' });
+  keepAwake();
   conn.send(hello());
 }
 
@@ -193,13 +197,40 @@ function joinRoom(room) {
     forget: () => {},
     reconnectNow: transport.reconnectNow,
   };
-  store.set(sessionKey, { room, host: false });
+  saveSession(room, false);
   update({ room, isHost: false, joinLink: joinLink(room), rejected: null, netStatus: 'connecting' });
+  keepAwake();
 }
 
 function disconnect() {
   conn?.close();
   conn = null;
+  letSleep();
+}
+
+// ---------- keeping the screen on ----------
+
+// A sleeping phone drops out of the game, and the host's phone runs it, so keep the
+// screen on while in a room. Browsers release the lock when the page is hidden.
+let wakeLock = null;
+let wantAwake = false;
+
+async function keepAwake() {
+  wantAwake = true;
+  if (wakeLock || !('wakeLock' in navigator) || document.visibilityState !== 'visible') return;
+  try {
+    wakeLock = await navigator.wakeLock.request('screen');
+    wakeLock.addEventListener('release', () => { wakeLock = null; });
+    if (!wantAwake) letSleep();
+  } catch {
+    wakeLock = null; // not allowed (e.g. battery saver); the game still works
+  }
+}
+
+function letSleep() {
+  wantAwake = false;
+  wakeLock?.release().catch(() => {});
+  wakeLock = null;
 }
 
 function leave() {
@@ -209,6 +240,7 @@ function leave() {
   const closing = conn;
   conn = null;
   setTimeout(() => closing?.close(), 300);
+  letSleep();
   store.remove(sessionKey);
   update({ room: null, lobby: null, view: null, rejected: null, netStatus: null, picked: new Set() });
 }
@@ -336,15 +368,30 @@ window.addEventListener('keyup', (e) => {
 
 // Phones drop connections while asleep; reconnect as soon as the page is visible again.
 document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'visible') conn?.reconnectNow();
-  else hide();
+  if (document.visibilityState === 'visible') {
+    conn?.reconnectNow();
+    if (wantAwake) keepAwake();
+  } else {
+    hide();
+  }
 });
+
+// The host's page runs the game: ask before closing it mid-game.
+window.addEventListener('beforeunload', (e) => {
+  if (app.isHost && app.view && app.view.phase !== 'GAME_OVER') e.preventDefault();
+});
+
+// Offline install and fast loading. Skipped on localhost so edits show up immediately.
+if ('serviceWorker' in navigator && location.hostname !== 'localhost' && params.get('sw') !== '0') {
+  navigator.serviceWorker.register('sw.js').catch(() => {});
+}
 // Local mode has no connection events, so say goodbye explicitly.
 window.addEventListener('pagehide', () => LOCAL && conn?.send({ type: C2H.BYE }));
 
 // ---------- start ----------
 
-const saved = store.get(sessionKey);
+const stored = store.get(sessionKey);
+const saved = stored && Date.now() - (stored.at ?? 0) < SESSION_MAX_AGE ? stored : null;
 if (params.get('room')) {
   const room = params.get('room').toUpperCase();
   if (params.get('host') === '1') hostRoom(room, Boolean(saved?.host && saved.room === room));

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { HostSession, C2H, H2C } from '../src/host.js';
+import { HostSession, C2H, H2C, PROTOCOL } from '../src/host.js';
 import { ACTIONS, PHASES } from '../src/index.js';
 import { seeded } from './helpers.js';
 
@@ -19,7 +19,7 @@ function setup(n = 5) {
   });
   const ids = ['h', ...Array.from({ length: n - 1 }, (_, i) => `c${i}`)];
   const hello = (id, extra = {}) =>
-    host.receive(`conn-${id}`, { type: C2H.HELLO, pid: id, secret: `s-${id}`, name: id.toUpperCase(), ...extra });
+    host.receive(`conn-${id}`, { type: C2H.HELLO, v: PROTOCOL, pid: id, secret: `s-${id}`, name: id.toUpperCase(), ...extra });
   for (const id of ids) hello(id);
   const from = (id, msg) => host.receive(`conn-${id}`, msg);
   const last = (id) => inbox[`conn-${id}`]?.at(-1);
@@ -100,25 +100,35 @@ test('actions are attributed to the connection, not to a claimed playerId', () =
 
 test('a device cannot take a seat without its secret', () => {
   const { host, inbox } = setup(5);
-  host.receive('evil-conn', { type: C2H.HELLO, pid: 'c1', secret: 'guess', name: 'Mallory' });
+  host.receive('evil-conn', { type: C2H.HELLO, v: PROTOCOL, pid: 'c1', secret: 'guess', name: 'Mallory' });
   assert.equal(inbox['evil-conn'].at(-1).code, 'wrong-secret');
   assert.equal(host.connOf.get('c1'), 'conn-c1', 'the real player keeps the seat');
   host.receive('evil-conn', { type: C2H.START });
   assert.equal(inbox['evil-conn'].at(-1).code, 'not-joined');
 });
 
+test('a device running another protocol version is asked to reload', () => {
+  const { host, inbox } = setup(5);
+  host.receive('old', { type: C2H.HELLO, pid: 'old', secret: 'o', name: 'Old' });
+  assert.equal(inbox.old.at(-1).code, 'version-mismatch');
+  assert.match(inbox.old.at(-1).message, /Your app is out of date/);
+  host.receive('new', { type: C2H.HELLO, v: PROTOCOL + 1, pid: 'new', secret: 'n', name: 'New' });
+  assert.match(inbox.new.at(-1).message, /host's app is out of date/);
+  assert.equal(host.players.length, 5);
+});
+
 test('malformed hellos are rejected', () => {
   const { host, inbox } = setup(5);
-  host.receive('x', { type: C2H.HELLO, pid: '', secret: 'a' });
-  host.receive('y', { type: C2H.HELLO, pid: 'ok', secret: '' });
-  host.receive('z', { type: C2H.HELLO, pid: 'has space', secret: 'a' });
+  host.receive('x', { type: C2H.HELLO, v: PROTOCOL, pid: '', secret: 'a' });
+  host.receive('y', { type: C2H.HELLO, v: PROTOCOL, pid: 'ok', secret: '' });
+  host.receive('z', { type: C2H.HELLO, v: PROTOCOL, pid: 'has space', secret: 'a' });
   for (const c of ['x', 'y', 'z']) assert.equal(inbox[c].at(-1).code, 'bad-hello');
 });
 
 test('a player rejoining on a new connection replaces the old one', () => {
   const { host, inbox, dropped, from } = setup(5);
   from('h', { type: C2H.START });
-  host.receive('new-conn', { type: C2H.HELLO, pid: 'c1', secret: 's-c1', name: 'renamed' });
+  host.receive('new-conn', { type: C2H.HELLO, v: PROTOCOL, pid: 'c1', secret: 's-c1', name: 'renamed' });
   assert.deepEqual(dropped, ['conn-c1']);
   assert.equal(inbox['new-conn'].at(-1).type, H2C.VIEW);
   assert.equal(host.players.find((p) => p.id === 'c1').name, 'C1', 'no renaming mid-game');
@@ -130,7 +140,7 @@ test('a player rejoining on a new connection replaces the old one', () => {
 test('strangers cannot join a running game; disconnected players show offline', () => {
   const { host, inbox, from } = setup(5);
   from('h', { type: C2H.START });
-  host.receive('x', { type: C2H.HELLO, pid: 'x', secret: 'x', name: 'X' });
+  host.receive('x', { type: C2H.HELLO, v: PROTOCOL, pid: 'x', secret: 'x', name: 'X' });
   assert.equal(inbox.x.at(-1).code, 'game-in-progress');
   host.disconnected('conn-c2');
   assert.equal(host.lobbyInfo().players.find((p) => p.id === 'c2').connected, false);
@@ -138,7 +148,7 @@ test('strangers cannot join a running game; disconnected players show offline', 
 
 test('the room is full at 10 players', () => {
   const { host, inbox } = setup(10);
-  host.receive('late', { type: C2H.HELLO, pid: 'late', secret: 'l', name: 'Late' });
+  host.receive('late', { type: C2H.HELLO, v: PROTOCOL, pid: 'late', secret: 'l', name: 'Late' });
   assert.equal(inbox.late.at(-1).code, 'room-full');
 });
 
@@ -158,11 +168,11 @@ test('a snapshot resumes the session after the host reloads', () => {
   const saved = JSON.parse(JSON.stringify(host.snapshot()));
   const inbox = {};
   const again = new HostSession({ hostId: 'h', saved, send: (to, msg) => (inbox[to] ??= []).push(msg) });
-  again.receive('self', { type: C2H.HELLO, pid: 'h', secret: 's-h', name: 'H' });
+  again.receive('self', { type: C2H.HELLO, v: PROTOCOL, pid: 'h', secret: 's-h', name: 'H' });
   assert.deepEqual(again.state, host.state);
   assert.equal(inbox.self.at(-1).type, H2C.VIEW);
   assert.equal(again.lobbyInfo().players.filter((p) => p.connected).length, 1, 'others must reconnect');
-  again.receive('c2-again', { type: C2H.HELLO, pid: 'c2', secret: 's-c2', name: 'C2' });
+  again.receive('c2-again', { type: C2H.HELLO, v: PROTOCOL, pid: 'c2', secret: 's-c2', name: 'C2' });
   assert.equal(inbox['c2-again'].at(-1).view.me.role, host.state.roles.c2);
 });
 

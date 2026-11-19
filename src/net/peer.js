@@ -34,6 +34,27 @@ function PeerClass() {
   return globalThis.Peer;
 }
 
+// Keepalive. WebRTC can take up to ~30 s to notice a vanished peer, so both sides
+// exchange tiny messages and treat a silent connection as dead. A device whose own
+// timers were frozen (a sleeping phone) gets a grace period instead of dropping everyone.
+export const PING_EVERY = 3000;
+export const DEAD_AFTER = 10000;
+const PING = { __hb: 'ping' };
+const PONG = { __hb: 'pong' };
+const isHeartbeat = (msg) => msg != null && typeof msg === 'object' && '__hb' in msg;
+
+/** Runs fn every PING_EVERY ms, passing whether this device was just asleep. */
+function every(fn) {
+  let last = Date.now();
+  const t = setInterval(() => {
+    const now = Date.now();
+    const slept = now - last > DEAD_AFTER;
+    last = now;
+    fn(now, slept);
+  }, PING_EVERY);
+  return () => clearInterval(t);
+}
+
 // PeerJS errors that mean "the matchmaking server is unreachable for now".
 const NETWORK_ERRORS = new Set(['network', 'server-error', 'socket-error', 'socket-closed', 'disconnected']);
 
@@ -52,6 +73,19 @@ export function peerHostTransport({ room, signal, retryTaken = false, onMessage,
   let n = 0;
   let takenTries = 0;
 
+  const kill = (id, entry) => {
+    conns.delete(id);
+    entry.dc.close();
+    onClose(id);
+  };
+  const stopBeat = every((now, slept) => {
+    for (const [id, entry] of conns) {
+      if (slept) entry.seen = now;
+      else if (now - entry.seen > DEAD_AFTER) kill(id, entry);
+      else if (entry.dc.open) entry.dc.send(PING);
+    }
+  });
+
   const later = (fn, ms) => { clearTimeout(timer); timer = setTimeout(() => !closed && fn(), ms); };
 
   function start() {
@@ -60,10 +94,18 @@ export function peerHostTransport({ room, signal, retryTaken = false, onMessage,
     peer.on('open', () => { takenTries = 0; onStatus('ready'); });
     peer.on('connection', (dc) => {
       const id = `c${++n}`;
-      conns.set(id, dc);
-      dc.on('data', (msg) => onMessage(id, msg));
+      const entry = { dc, seen: Date.now() };
+      conns.set(id, entry);
+      dc.on('data', (msg) => {
+        entry.seen = Date.now();
+        if (isHeartbeat(msg)) {
+          if (msg.__hb === 'ping' && dc.open) dc.send(PONG);
+          return;
+        }
+        onMessage(id, msg);
+      });
       dc.on('close', () => {
-        if (conns.get(id) !== dc) return;
+        if (conns.get(id) !== entry) return;
         conns.delete(id);
         onClose(id);
       });
@@ -97,11 +139,11 @@ export function peerHostTransport({ room, signal, retryTaken = false, onMessage,
 
   return {
     send(connId, msg) {
-      const dc = conns.get(connId);
+      const dc = conns.get(connId)?.dc;
       if (dc?.open) dc.send(msg);
     },
     drop(connId) {
-      const dc = conns.get(connId);
+      const dc = conns.get(connId)?.dc;
       conns.delete(connId);
       // Let a last message (e.g. "removed") go out before closing.
       if (dc) setTimeout(() => dc.close(), 500);
@@ -109,6 +151,7 @@ export function peerHostTransport({ room, signal, retryTaken = false, onMessage,
     close() {
       closed = true;
       clearTimeout(timer);
+      stopBeat();
       peer?.destroy();
     },
   };
@@ -125,6 +168,14 @@ export function peerClientTransport({ room, signal, onMessage, onOpen = () => {}
   let closed = false;
   let timer = null;
   let everOpen = false;
+  let heard = 0;
+
+  const stopBeat = every((now, slept) => {
+    if (!dc?.open) return;
+    if (slept) heard = now;
+    else if (now - heard > DEAD_AFTER) dc.close(); // the close handler reconnects
+    else dc.send(PING);
+  });
 
   const later = (fn, ms) => { clearTimeout(timer); timer = setTimeout(() => !closed && fn(), ms); };
 
@@ -156,11 +207,20 @@ export function peerClientTransport({ room, signal, onMessage, onOpen = () => {}
     let opened = false;
     mine.on('open', () => {
       opened = true;
+      heard = Date.now();
       everOpen = true;
       onStatus('open');
       onOpen();
     });
-    mine.on('data', (msg) => dc === mine && onMessage(msg));
+    mine.on('data', (msg) => {
+      if (dc !== mine) return;
+      heard = Date.now();
+      if (isHeartbeat(msg)) {
+        if (msg.__hb === 'ping') mine.send(PONG);
+        return;
+      }
+      onMessage(msg);
+    });
     mine.on('close', () => {
       if (dc !== mine || closed) return;
       onStatus('reconnecting');
@@ -189,6 +249,7 @@ export function peerClientTransport({ room, signal, onMessage, onOpen = () => {}
     close() {
       closed = true;
       clearTimeout(timer);
+      stopBeat();
       peer?.destroy();
     },
     /** Call when the page becomes visible again: phones often drop connections while asleep. */

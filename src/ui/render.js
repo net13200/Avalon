@@ -48,7 +48,7 @@ function homeScreen(app) {
   return `
   <main class="screen home">
     <header class="hero">
-      <div class="crest" aria-hidden="true">⚔</div>
+      <img class="crest" src="icon.svg" alt="" width="96" height="96" />
       <h1>Avalon</h1>
       <p class="tagline">Loyalty, deceit and quests: one phone per player.</p>
     </header>

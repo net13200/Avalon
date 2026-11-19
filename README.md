@@ -9,7 +9,7 @@ The host's phone runs the game and holds the full state. The other phones connec
 1. ✅ **Rules engine and tests**: pure, framework-free game logic.
 2. ✅ **Local prototype**: the full app, played across browser tabs connected via `BroadcastChannel`.
 3. ✅ **WebRTC**: phones connect peer to peer, join with a room code or QR code, and rejoin after a reload.
-4. Reliability: detecting dead connections, wake lock, offline install.
+4. ✅ **Reliability**: keepalive detection of dropped connections, screen wake lock, version check, installable PWA.
 5. Polish: original art, sound, game history.
 6. Add a card to the SugiGames portal.
 
@@ -21,6 +21,11 @@ The host's phone runs the game and holds the full state. The other phones connec
 4. The host's phone must stay open for the whole game, because it runs the game.
 
 A phone that reloads, sleeps or loses its connection rejoins its seat automatically. If the host's phone reloads, the game resumes from its saved state and the others reconnect. Someone who opens the link after the game has started is turned away.
+
+- **Screen stays on:** while you're in a room, the app asks the phone to keep the screen awake, because a sleeping phone drops out. The host's page also asks for confirmation before it's closed mid-game.
+- **Dropped connections:** phones exchange small keepalive messages every 3 seconds. A phone silent for 10 seconds is shown as offline, and players whose host goes silent see "Lost the host. Reconnecting…".
+- **Install:** "Add to Home Screen" installs Avalon as an app. It then opens without downloading anything. Playing still needs the internet, to find the other phones.
+- **Updates:** a new version reaches each phone the next time it loads the app. If a phone and the host run incompatible versions, the player is asked to reload instead of getting errors.
 
 ### How the connection works
 
@@ -39,6 +44,7 @@ npm run serve          # http://localhost:8000
 ```
 
 - **`dev.html`, the test table**: every seat of a 5–10 player game on one screen, each in its own frame. Seat 1 hosts. By default the frames talk over `BroadcastChannel`. For real WebRTC, run `npm run signal` and open `dev.html?net=peer&signal=localhost:9000`.
+- **Caching:** the service worker is skipped on `localhost` (and with `?sw=0`), so edits show up on reload.
 - **`index.html`**: the real app. Add `?net=local` to connect tabs of one browser without WebRTC. Tabs of one browser share `localStorage`, so for WebRTC tests across tabs use the test table, which gives each frame its own player id.
 
 ### How a game plays
@@ -61,6 +67,7 @@ npm run serve          # http://localhost:8000
 | `src/net/local.js` | `BroadcastChannel` transport for development, with the same interface |
 | `src/ui/` | `app.js` (wiring and events), `render.js` (HTML from state), `text.js` (English text) |
 | `vendor/` | PeerJS and a QR code generator, copied unmodified from npm (MIT) |
+| `sw.js`, `manifest.webmanifest`, `icon*` | service worker, install manifest and icons. `icon.svg` and `icon-maskable.svg` are the sources for the PNGs. |
 | `dev.html` | the test table |
 
 The host's own player talks to its `HostSession` directly. Every other device sends `C2H` messages and receives `H2C` messages (see `src/host.js`). A connection becomes a seat by saying hello with that seat's secret. The host then attributes every action to the connection's seat, so a device can't act as someone else.
@@ -126,4 +133,9 @@ NET=local npm run e2e    # BroadcastChannel only; NET=peer for WebRTC only
 SHOTS=shots npm run e2e  # also saves phone-sized screenshots of each phase
 ```
 
-This plays complete games in Chromium, with one page per player. It runs them twice: once over `BroadcastChannel`, and once over real WebRTC through a local PeerJS server it starts itself. The WebRTC run also reloads a player's page and then the host's page mid-game and checks that everyone reconnects. Both runs check that a stranger can't join a game in progress.
+This plays complete games in Chromium, with one page per player. It runs them twice: once over `BroadcastChannel`, and once over real WebRTC through a local PeerJS server it starts itself. The WebRTC run also reloads a player's page and then the host's page mid-game and checks that everyone reconnects. Both runs check that a stranger can't join a game in progress. The WebRTC run also checks three more things:
+- When a player loses their network, the host marks them offline within about 10 seconds, and they rejoin when the network returns.
+- When the host loses its network, players see "Lost the host", and everyone reconnects when it returns.
+- A phone running an outdated version is asked to reload.
+
+The suite also checks that the app is installable and opens offline from the cache.
