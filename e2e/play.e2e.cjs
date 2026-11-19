@@ -62,6 +62,12 @@ async function playGame(browser, base, n, { lady, shots, netParams, reload, labe
   if (lady) await host.click('[data-act=lady]');
   await host.waitForSelector('[data-act=start]:not([disabled])');
   await shot(host, 'lobby');
+  await host.click('[data-act=sheet][data-id=rules]');
+  await host.waitForSelector('.sheet .sizes');
+  await host.waitForTimeout(400);
+  await shot(host, 'rules');
+  await host.keyboard.press('Escape');
+  await host.waitForSelector('.sheet', { state: 'detached' });
   await shot(pages[1], 'lobby-player');
   await host.click('[data-act=start]');
   await everyone('.quests');
@@ -127,6 +133,17 @@ async function playGame(browser, base, n, { lady, shots, netParams, reload, labe
 
   await everyone('.phase.over', 10000);
   await shot(host, 'over');
+
+  // The history sheet lists every proposal of the game.
+  await host.click('[data-act=sheet][data-id=history]');
+  await host.waitForSelector('.sheet .proposal');
+  const logged = await host.$$eval('.sheet .proposal', (els) => els.length);
+  const quests = await host.$$eval('.quest.success, .quest.fail', (els) => els.length);
+  assert.ok(logged >= quests, `history lists ${logged} proposals for ${quests} quests`);
+  await host.waitForTimeout(400); // let the sheet finish sliding in
+  await shot(host, 'history');
+  await host.click('.sheet [data-act=close-sheet]');
+  await host.waitForSelector('.sheet', { state: 'detached' });
   const winner = await host.textContent('.phase.over h2');
   assert.equal(await host.$$eval('.chip.role', (els) => els.length), n, 'all roles revealed at the end');
 

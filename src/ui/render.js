@@ -1,8 +1,9 @@
 // Turns the app state into HTML. Pure functions; event handling lives in app.js.
 // Buttons carry data-act (and data-id) attributes that app.js dispatches on.
 
-import { ROLES, EVIL_COUNT, MIN_PLAYERS, MAX_PLAYERS } from '../rules.js';
+import { ROLES, EVIL_COUNT, MIN_PLAYERS, MAX_PLAYERS, QUEST_SIZES } from '../rules.js';
 import { ROLE_TEXT, CHARACTER_OPTIONS, WIN_TEXT, PHASE_TITLE } from './text.js';
+import { emblem, icon } from './art.js';
 import { qrcode } from '../../vendor/qrcode.mjs';
 
 const esc = (s) => String(s).replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
@@ -35,11 +36,26 @@ function statusLine(app, always = false) {
 }
 
 export function render(app) {
+  return screen(app) + sheet(app);
+}
+
+function screen(app) {
   if (app.rejected) return rejectedScreen(app);
   if (!app.room) return homeScreen(app);
   if (app.view) return gameScreen(app);
   if (app.lobby) return lobbyScreen(app);
   return connectingScreen(app);
+}
+
+/** Header buttons: history (in a game), rules and sound. */
+function tools(app, { history = false } = {}) {
+  return `
+    <span class="tools">
+      ${history ? `<button class="icon-btn" data-act="sheet" data-id="history" aria-label="Game history" title="Game history">${icon('history')}</button>` : ''}
+      <button class="icon-btn" data-act="sheet" data-id="rules" aria-label="How to play" title="How to play">${icon('rules')}</button>
+      <button class="icon-btn" data-act="mute" aria-label="${app.muted ? 'Turn sound on' : 'Turn sound off'}" aria-pressed="${!app.muted}"
+        title="${app.muted ? 'Sound off' : 'Sound on'}">${icon(app.muted ? 'sound-off' : 'sound-on')}</button>
+    </span>`;
 }
 
 // ---------- home ----------
@@ -66,6 +82,7 @@ function homeScreen(app) {
       </div>
       ${app.formError ? `<p class="error" role="alert">${esc(app.formError)}</p>` : ''}
     </form>
+    <button class="btn ghost small center-self" data-act="sheet" data-id="rules">How to play</button>
     ${app.joinCode ? '<p class="fineprint"><a href="?">Host a game instead</a></p>' : `
     <p class="fineprint">Everyone plays on their own phone. One player hosts and keeps the app open;
       the others join with the room code or by scanning the host's QR code.</p>`}
@@ -117,6 +134,7 @@ function lobbyScreen(app) {
     return `
       <label class="toggle ${blocked ? 'blocked' : ''}">
         <input type="checkbox" data-act="character" data-id="${c.key}" ${on ? 'checked' : ''} ${isHost && !blocked ? '' : 'disabled'} />
+        <span class="emblems">${c.roles.map((r) => emblem(r, 26, ROLES[r].side)).join('')}</span>
         <span><strong>${c.label}</strong><small>${c.hint}</small></span>
       </label>`;
   }).join('');
@@ -127,6 +145,7 @@ function lobbyScreen(app) {
     <header class="bar">
       <button class="btn ghost small" data-act="leave">Leave</button>
       <span>Room <strong class="code">${esc(app.room)}</strong></span>
+      ${tools(app)}
     </header>
     ${statusLine(app)}
     <section class="card join-card">
@@ -164,19 +183,18 @@ function lobbyScreen(app) {
 
 function gameScreen(app) {
   const { view } = app;
-  const name = names(view);
   return `
   <main class="screen game phase-${view.phase.toLowerCase()}">
     <header class="bar">
       <span class="code">${esc(app.room)}</span>
       <span>${view.phase === 'GAME_OVER' ? 'Game over' : `Quest ${view.quest + 1} of 5`}</span>
-      <span class="me">${esc(name(app.pid))}</span>
+      ${tools(app, { history: true })}
     </header>
     ${statusLine(app)}
-    ${questTrack(view)}
+    ${questTrack(view, app.fresh)}
     ${view.phase === 'GAME_OVER' ? gameOver(app) : phaseCard(app)}
     ${playerList(app)}
-    ${lastVote(view)}
+    ${lastVote(view, app.fresh)}
     ${view.phase === 'GAME_OVER' ? '' : roleButton(app)}
     ${app.revealing ? roleOverlay(app) : ''}
     ${toast(app)}
@@ -189,7 +207,7 @@ const names = (view) => {
 };
 const nameList = (view, ids) => ids.map((id) => `<strong>${esc(names(view)(id))}</strong>`).join(', ');
 
-function questTrack(view) {
+function questTrack(view, fresh = {}) {
   const tokens = view.questSizes.map((size, q) => {
     const result = view.questResults[q];
     const cls = result ? (result.success ? 'success' : 'fail') : q === view.quest ? 'current' : '';
@@ -197,7 +215,7 @@ function questTrack(view) {
       ? `Quest ${q + 1}: ${result.success ? 'succeeded' : 'failed'} with ${plural(result.fails, 'fail')}`
       : `Quest ${q + 1}: team of ${size}${view.failsRequired[q] > 1 ? ', needs 2 fails to fail' : ''}`;
     return `
-      <li class="quest ${cls}" title="${label}" aria-label="${label}">
+      <li class="quest ${cls} ${fresh.quest === q ? 'fresh' : ''}" title="${label}" aria-label="${label}">
         <span class="size">${result ? (result.success ? '✓' : '✗') : size}</span>
         ${view.failsRequired[q] > 1 ? '<span class="two">2 fails</span>' : ''}
       </li>`;
@@ -225,7 +243,7 @@ function phaseCard(app) {
   const lastVote = view.history.at(-1);
   if (justDone && ['TEAM_BUILD', 'LADY', 'ASSASSINATION'].includes(view.phase)
       && lastVote?.approved && lastVote.quest === justDone.quest) {
-    body += `<p class="announce ${justDone.success ? 'good' : 'evil'}">Quest ${justDone.quest + 1}
+    body += `<p class="announce ${justDone.success ? 'good' : 'evil'} ${app.fresh?.quest === justDone.quest ? 'fresh' : ''}">Quest ${justDone.quest + 1}
       ${justDone.success ? 'succeeded' : 'failed'}: ${plural(justDone.fails, 'Fail card')}.</p>`;
   }
 
@@ -325,7 +343,7 @@ function playerList(app) {
     const chips = [];
     if (over) {
       const role = view.roles[p.id];
-      chips.push(`<span class="chip role ${ROLES[role].side}">${ROLES[role].name}</span>`);
+      chips.push(`<span class="chip role ${ROLES[role].side}">${emblem(role, 14)}${ROLES[role].name}</span>`);
     } else {
       if (p.id === view.leader) chips.push('<span class="chip leader">leader</span>');
       if (view.team.includes(p.id)) chips.push('<span class="chip team">team</span>');
@@ -352,7 +370,7 @@ function playerList(app) {
   return `<section class="card"><ol class="players">${rows}</ol></section>`;
 }
 
-function lastVote(view) {
+function lastVote(view, fresh = {}) {
   const last = view.history.at(-1);
   if (!last) return '';
   const name = names(view);
@@ -362,18 +380,18 @@ function lastVote(view) {
     ? (last.fails === undefined ? 'Approved' : `Approved: quest ${last.fails < view.failsRequired[last.quest] ? 'succeeded' : 'failed'} with ${plural(last.fails, 'Fail card')}`)
     : 'Rejected';
   return `
-    <details class="card history">
+    <details class="card last-vote ${fresh.vote === view.history.length - 1 ? 'fresh' : ''}" ${fresh.vote === view.history.length - 1 ? 'open' : ''}>
       <summary>Last vote: <strong>${outcome}</strong></summary>
       <p class="small">Quest ${last.quest + 1}, led by ${esc(name(last.leader))}: ${nameList(view, last.team)}</p>
       <ul class="votes">${votes}</ul>
-      ${view.history.length > 1 ? `<p class="muted small">${plural(view.history.length, 'vote')} so far this game.</p>` : ''}
+      <button class="btn small" data-act="sheet" data-id="history">Full history (${plural(view.history.length, 'vote')})</button>
     </details>`;
 }
 
 function roleButton(app) {
   return `
     <div class="role-dock">
-      <button class="btn role-btn" data-act="reveal">Hold to see your role</button>
+      <button class="btn role-btn ${app.roleSeen ? '' : 'pulse'}" data-act="reveal">${app.roleSeen ? 'Hold to see your role' : 'Hold here to see your secret role'}</button>
     </div>`;
 }
 
@@ -399,6 +417,7 @@ function roleOverlay(app) {
   return `
     <div class="overlay" role="dialog" aria-label="Your role">
       <div class="role-card ${me.side}">
+        ${emblem(me.role, 88)}
         <p class="side">${me.side === 'good' ? 'Loyal to Arthur' : 'Minion of Mordred'}</p>
         <h2>${me.roleName}</h2>
         <p>${ROLE_TEXT[me.role]}</p>
@@ -422,10 +441,101 @@ function gameOver(app) {
       ${view.assassinTarget ? `<p>The Assassin named <strong>${esc(name(view.assassinTarget))}</strong>.</p>` : ''}
       <p class="result">${won ? 'You won!' : 'You lost.'}</p>
       ${findings.length ? `<p class="muted small">Lady of the Lake: ${findings.map((f) => `${esc(name(f.holder))} examined ${esc(name(f.target))}`).join('; ')}.</p>` : ''}
+      <button class="btn wide" data-act="sheet" data-id="history">See the whole game</button>
       ${isHost ? '<button class="btn primary wide" data-act="new-game">Back to the lobby</button>' : '<p class="muted small">The host can start a new game.</p>'}
     </section>`;
 }
 
 function toast(app) {
   return app.toast ? `<div class="toast" role="alert">${esc(app.toast)}</div>` : '';
+}
+
+// ---------- sheets: history and rules ----------
+
+function sheet(app) {
+  if (!app.sheet) return '';
+  const content = app.sheet === 'history' && app.view ? historySheet(app) : rulesSheet(app);
+  const title = app.sheet === 'history' && app.view ? 'Game history' : 'How to play';
+  return `
+    <div class="sheet-backdrop" data-act="close-sheet"></div>
+    <section class="sheet" role="dialog" aria-modal="true" aria-label="${title}">
+      <header class="sheet-head">
+        <h2>${title}</h2>
+        <button class="icon-btn" data-act="close-sheet" aria-label="Close">${icon('close')}</button>
+      </header>
+      <div class="sheet-body">${content}</div>
+    </section>`;
+}
+
+function historySheet(app) {
+  const { view } = app;
+  const name = names(view);
+  const examinations = view.lady?.examinations ?? [];
+  const quests = [];
+  for (let q = 0; q <= Math.min(view.quest, 4); q++) {
+    const proposals = view.history.filter((h) => h.quest === q);
+    const result = view.questResults[q];
+    if (!proposals.length && !result && q !== view.quest) continue;
+    const status = result
+      ? `<span class="chip ${result.success ? 'ok' : 'bad'}">${result.success ? 'Succeeded' : 'Failed'}: ${plural(result.fails, 'Fail card')}</span>`
+      : view.phase === 'GAME_OVER' ? '' : '<span class="chip">in progress</span>';
+    const items = proposals.map((h, i) => {
+      const yes = view.players.filter((p) => h.votes[p.id]);
+      const no = view.players.filter((p) => !h.votes[p.id]);
+      return `
+        <li class="proposal ${h.approved ? 'approved' : 'rejected'}">
+          <p><strong>${esc(name(h.leader))}</strong> proposed ${nameList(view, h.team)}
+            <span class="verdict">${h.approved ? 'Approved' : 'Rejected'} ${yes.length}–${no.length}</span></p>
+          <p class="small"><span class="yes">Approve:</span> ${yes.map((p) => esc(p.name)).join(', ') || 'no one'}</p>
+          <p class="small"><span class="no">Reject:</span> ${no.map((p) => esc(p.name)).join(', ') || 'no one'}</p>
+        </li>`;
+    }).join('');
+    const lady = examinations.filter((e) => e.quest === q)
+      .map((e) => `<p class="small lady-note">Lady of the Lake: ${esc(name(e.holder))} examined ${esc(name(e.target))}.</p>`).join('');
+    quests.push(`
+      <section class="quest-log">
+        <h3>Quest ${q + 1} <span class="muted small">team of ${view.questSizes[q]}${view.failsRequired[q] > 1 ? ', 2 fails needed' : ''}</span> ${status}</h3>
+        ${items ? `<ol class="proposals">${items}</ol>` : '<p class="muted small">No team proposed yet.</p>'}
+        ${lady}
+      </section>`);
+  }
+  return quests.join('') || '<p class="muted">Nothing has happened yet.</p>';
+}
+
+function rulesSheet(app) {
+  const n = app.view?.players.length ?? app.lobby?.players.length ?? 0;
+  const counts = n >= MIN_PLAYERS && n <= MAX_PLAYERS ? [n] : [5, 6, 7, 8, 9, 10];
+  const sizes = counts.map((c) => `
+    <tr><th>${c}</th><td>${c - EVIL_COUNT[c]} / ${EVIL_COUNT[c]}</td>${QUEST_SIZES[c].map((k, q) => `<td>${k}${q === 3 && c >= 7 ? '*' : ''}</td>`).join('')}</tr>`).join('');
+  const role = (r, text) => `<li>${emblem(r, 28, ROLES[r].side)}<span><strong>${ROLES[r].name}</strong>: ${text}</span></li>`;
+  return `
+    <p>Good and evil players hide among each other. Good wins by completing <strong>3 quests</strong>; evil wins by failing 3, or if <strong>5 teams in a row</strong> are rejected.</p>
+    <h3>Each round</h3>
+    <ol class="steps">
+      <li>The <strong>leader</strong> picks a team of the size shown on the quest track.</li>
+      <li><strong>Everyone votes</strong> to approve or reject the team. Votes are revealed together; a tie rejects. If it's rejected, the next player leads.</li>
+      <li>An approved team goes on the <strong>quest</strong>: each member secretly plays Success or Fail. Good players must play Success. One Fail card fails the quest (two on the 4th quest with 7+ players).</li>
+      <li>The leader passes to the next player in seat order.</li>
+    </ol>
+    <p>If good completes 3 quests, the <strong>Assassin</strong> gets one guess at who Merlin is. A correct guess wins for evil.</p>
+    <h3>Characters</h3>
+    <ul class="role-list">
+      ${role('merlin', 'knows who is evil (except Mordred). Must guide good without being spotted.')}
+      ${role('percival', 'sees Merlin and Morgana, but not which is which.')}
+      ${role('servant', 'knows nothing but what they observe.')}
+      ${role('assassin', 'names Merlin at the end if good wins three quests.')}
+      ${role('morgana', 'appears to Percival as a possible Merlin.')}
+      ${role('mordred', 'is hidden from Merlin.')}
+      ${role('oberon', 'is evil but unknown to the other evil players, and doesn\'t know them.')}
+      ${role('minion', 'knows the other evil players (except Oberon).')}
+    </ul>
+    <p><strong>Lady of the Lake</strong> (optional): after quests 2, 3 and 4 its holder secretly learns one player's loyalty, then passes the Lady to them. Past holders can't be examined.</p>
+    <h3>Team sizes</h3>
+    <div class="table-wrap">
+      <table class="sizes">
+        <thead><tr><th>Players</th><th>Good / Evil</th><th>Q1</th><th>Q2</th><th>Q3</th><th>Q4</th><th>Q5</th></tr></thead>
+        <tbody>${sizes}</tbody>
+      </table>
+    </div>
+    <p class="muted small">* needs two Fail cards to fail.</p>`;
 }

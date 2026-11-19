@@ -12,6 +12,8 @@ import { localHostTransport, localClientTransport } from '../net/local.js';
 import { peerHostTransport, peerClientTransport } from '../net/peer.js';
 import { CHARACTER_OPTIONS } from './text.js';
 import { render, pickMode } from './render.js';
+import { changes } from './events.js';
+import { play, unlockAudio, setMuted } from './sound.js';
 
 const root = document.getElementById('app');
 const params = new URLSearchParams(location.search);
@@ -79,7 +81,14 @@ const app = {
   toast: null,
   rejected: null,
   formError: null,
+  sheet: null, // 'history' | 'rules'
+  muted: false,
+  roleSeen: false,
+  fresh: {}, // what was just revealed, for animations
 };
+// Sound preference is per device, kept across sessions and modes.
+try { app.muted = localStorage.getItem('avalon.muted') === '1'; } catch { /* private mode */ }
+setMuted(app.muted);
 
 let conn = null; // { send(msg), close(), forget(), reconnectNow() }
 let toastTimer = null;
@@ -88,9 +97,21 @@ const sessionKey = `avalon.session.${pid}`;
 const SESSION_MAX_AGE = 12 * 60 * 60 * 1000;
 const saveSession = (room, host) => store.set(sessionKey, { room, host, at: Date.now() });
 
-function update(changes = {}) {
-  Object.assign(app, changes);
+function update(patch = {}) {
+  Object.assign(app, patch);
+  // Re-rendering replaces the DOM: keep an open sheet's scroll position.
+  const scrolled = root.querySelector('.sheet-body')?.scrollTop ?? 0;
   root.innerHTML = render(app);
+  const body = root.querySelector('.sheet-body');
+  if (body) body.scrollTop = scrolled;
+}
+
+let freshTimer = null;
+function markFresh(fresh) {
+  if (!Object.keys(fresh).length) return;
+  clearTimeout(freshTimer);
+  app.fresh = fresh;
+  freshTimer = setTimeout(() => update({ fresh: {} }), 1800);
 }
 
 function showToast(text) {
@@ -104,13 +125,21 @@ function showToast(text) {
 function onHostMessage(msg) {
   switch (msg?.type) {
     case H2C.LOBBY:
-      update({ lobby: msg.lobby, view: null, picked: new Set() });
+      update({ lobby: msg.lobby, view: null, picked: new Set(), sheet: app.sheet === 'history' ? null : app.sheet });
       break;
     case H2C.VIEW: {
       const before = app.view;
       const turnChanged = !before || before.phase !== msg.view.phase
         || before.quest !== msg.view.quest || before.leader !== msg.view.leader;
-      update({ lobby: msg.lobby, view: msg.view, picked: turnChanged ? new Set() : app.picked });
+      const happened = changes(before, msg.view, pid);
+      for (const { name, delay } of happened.sounds) play(name, delay);
+      markFresh(happened.fresh);
+      update({
+        lobby: msg.lobby,
+        view: msg.view,
+        picked: turnChanged ? new Set() : app.picked,
+        roleSeen: before ? app.roleSeen : false,
+      });
       break;
     }
     case H2C.ERROR:
@@ -290,6 +319,15 @@ function onAction(el) {
       return joinRoom(code);
     }
     case 'leave': return leave();
+    case 'sheet': return update({ sheet: id });
+    case 'close-sheet': return update({ sheet: null });
+    case 'mute': {
+      const muted = !app.muted;
+      setMuted(muted);
+      try { localStorage.setItem('avalon.muted', muted ? '1' : '0'); } catch { /* private mode */ }
+      if (!muted) play('turn');
+      return update({ muted });
+    }
     case 'share': return shareLink();
     case 'seat-up': return conn.send({ type: C2H.MOVE_SEAT, playerId: id, delta: -1 });
     case 'seat-down': return conn.send({ type: C2H.MOVE_SEAT, playerId: id, delta: 1 });
@@ -349,9 +387,10 @@ root.addEventListener('change', (e) => {
 // Hold to reveal: the role shows only while the button is pressed.
 const hide = () => app.revealing && update({ revealing: false });
 root.addEventListener('pointerdown', (e) => {
+  unlockAudio(); // browsers allow sound only after a user gesture
   if (e.target.closest('[data-act=reveal]')) {
     e.preventDefault();
-    update({ revealing: true });
+    update({ revealing: true, roleSeen: true });
   }
 });
 for (const type of ['pointerup', 'pointercancel', 'blur']) window.addEventListener(type, hide);
@@ -359,8 +398,11 @@ root.addEventListener('contextmenu', (e) => app.revealing && e.preventDefault())
 root.addEventListener('keydown', (e) => {
   if ((e.key === ' ' || e.key === 'Enter') && e.target.closest?.('[data-act=reveal]')) {
     e.preventDefault();
-    if (!app.revealing) update({ revealing: true });
+    if (!app.revealing) update({ revealing: true, roleSeen: true });
   }
+});
+window.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && app.sheet) update({ sheet: null });
 });
 window.addEventListener('keyup', (e) => {
   if (e.key === ' ' || e.key === 'Enter') hide();

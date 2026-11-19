@@ -23,6 +23,9 @@ const SHELL = [
   'src/ui/app.js',
   'src/ui/render.js',
   'src/ui/text.js',
+  'src/ui/art.js',
+  'src/ui/sound.js',
+  'src/ui/events.js',
 ];
 
 self.addEventListener('install', (event) => {

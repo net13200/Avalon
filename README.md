@@ -10,7 +10,7 @@ The host's phone runs the game and holds the full state. The other phones connec
 2. ✅ **Local prototype**: the full app, played across browser tabs connected via `BroadcastChannel`.
 3. ✅ **WebRTC**: phones connect peer to peer, join with a room code or QR code, and rejoin after a reload.
 4. ✅ **Reliability**: keepalive detection of dropped connections, screen wake lock, version check, installable PWA.
-5. Polish: original art, sound, game history.
+5. ✅ **Polish**: original character emblems, synthesized sound and vibration, game history, rules sheet, reveal animations.
 6. Add a card to the SugiGames portal.
 
 ## Playing on phones
@@ -50,12 +50,18 @@ npm run serve          # http://localhost:8000
 ### How a game plays
 
 - **Lobby:** the host orders the seats to match where people sit. The leader passes in seat order. The host also picks the characters: Merlin & Assassin and Percival & Morgana are on by default, and Mordred, Oberon and Lady of the Lake are optional.
-- **Your role:** hold the button at the bottom of the screen to see your role and what you know. It hides as soon as you let go.
+- **Your role:** hold the button at the bottom of the screen to see your role and what you know. It hides as soon as you let go. The button pulses until you've looked once.
 - **Team building:** the leader taps players to build the team, then proposes it.
 - **Voting:** everyone votes on their own phone. The votes are revealed together under "Last vote".
 - **Quest:** team members play Success or Fail in secret. Good players' Fail button is disabled. Only the number of Fail cards is announced.
 - **Lady of the Lake and the assassination:** the player whose turn it is taps a target on the player list.
 - **End:** all roles are revealed, and the host can return everyone to the lobby for another game.
+- **Header buttons:**
+  - **History:** every proposal of the game, with who approved and who rejected, grouped by quest, plus quest results and Lady of the Lake checks.
+  - **How to play:** a rules summary with the team-size table.
+  - **Sound:** on or off. The setting is remembered on each phone.
+
+**Sound and vibration:** effects play for a new game, your turn, vote results, quest results and the end of the game. Only public events make a sound, so a sound can't give away anyone's role. For the same reason, the Assassin's turn is silent. The sounds are synthesized with the Web Audio API, so there are no audio files.
 
 ### Code layout
 
@@ -65,7 +71,7 @@ npm run serve          # http://localhost:8000
 | `src/host.js` | `HostSession`: lobby, seats, game state and messages. Doesn't depend on any network. |
 | `src/net/peer.js` | WebRTC transport (PeerJS) with automatic reconnection |
 | `src/net/local.js` | `BroadcastChannel` transport for development, with the same interface |
-| `src/ui/` | `app.js` (wiring and events), `render.js` (HTML from state), `text.js` (English text) |
+| `src/ui/` | `app.js` (wiring and events), `render.js` (HTML from state), `text.js` (English text), `art.js` (character emblems and icons, inline SVG), `sound.js` (synthesized effects), `events.js` (works out what just happened, for sounds and animations) |
 | `vendor/` | PeerJS and a QR code generator, copied unmodified from npm (MIT) |
 | `sw.js`, `manifest.webmanifest`, `icon*` | service worker, install manifest and icons. `icon.svg` and `icon-maskable.svg` are the sources for the PNGs. |
 | `dev.html` | the test table |
