@@ -3,9 +3,36 @@
 
 import { ROLES, EVIL_COUNT, MIN_PLAYERS, MAX_PLAYERS } from '../rules.js';
 import { ROLE_TEXT, CHARACTER_OPTIONS, WIN_TEXT, PHASE_TITLE } from './text.js';
+import { qrcode } from '../../vendor/qrcode.mjs';
 
 const esc = (s) => String(s).replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
 const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
+
+function qrSvg(text) {
+  const qr = qrcode(0, 'M');
+  qr.addData(text);
+  qr.make();
+  return qr.createSvgTag({ cellSize: 4, margin: 4, scalable: true });
+}
+
+const HOST_STATUS = {
+  connecting: 'Connecting to the matchmaking server…',
+  offline: "Can't reach the matchmaking server, so new players can't join right now. Connected players can keep playing.",
+  error: 'Connection problem. Try leaving and hosting again.',
+};
+const CLIENT_STATUS = {
+  connecting: 'Connecting…',
+  'no-host': "Can't find this room yet. Check the code, and that the host's screen is on.",
+  reconnecting: 'Lost the host. Reconnecting…',
+  offline: 'No connection. Check your internet. Retrying…',
+};
+
+/** A connection warning, or nothing when all is well. */
+function statusLine(app, always = false) {
+  const text = (app.isHost ? HOST_STATUS : CLIENT_STATUS)[app.netStatus];
+  if (!text) return '';
+  return `<p class="status ${always ? 'plain' : ''}" role="status">${esc(text)}</p>`;
+}
 
 export function render(app) {
   if (app.rejected) return rejectedScreen(app);
@@ -30,17 +57,18 @@ function homeScreen(app) {
         <span>Your name</span>
         <input name="name" maxlength="20" autocomplete="nickname" required value="${esc(app.name)}" />
       </label>
-      <button class="btn primary" data-act="host" type="button">Host a new game</button>
-      <div class="or"><span>or join one</span></div>
+      ${app.joinCode ? '' : `<button class="btn primary" data-act="host" type="button">Host a new game</button>
+      <div class="or"><span>or join one</span></div>`}
       <div class="row">
         <input name="code" class="code-input" maxlength="4" placeholder="CODE" autocapitalize="characters"
-          autocomplete="off" aria-label="Room code" />
-        <button class="btn" data-act="join" type="submit">Join</button>
+          autocomplete="off" aria-label="Room code" value="${esc(app.joinCode ?? '')}" />
+        <button class="btn ${app.joinCode ? 'primary' : ''}" data-act="join" type="submit">Join</button>
       </div>
       ${app.formError ? `<p class="error" role="alert">${esc(app.formError)}</p>` : ''}
     </form>
-    <p class="fineprint">Local test mode: players join from other tabs of this browser.
-      <a href="dev.html">Open a test table</a> to play every seat on one screen.</p>
+    ${app.joinCode ? '<p class="fineprint"><a href="?">Host a game instead</a></p>' : `
+    <p class="fineprint">Everyone plays on their own phone. One player hosts and keeps the app open;
+      the others join with the room code or by scanning the host's QR code.</p>`}
   </main>`;
 }
 
@@ -48,8 +76,8 @@ function connectingScreen(app) {
   return `
   <main class="screen center">
     <div class="spinner" aria-hidden="true"></div>
-    <p>Looking for room <strong class="code">${esc(app.room)}</strong>…</p>
-    <p class="muted">The host's screen must be open.</p>
+    <p>${app.isHost ? 'Opening room' : 'Looking for room'} <strong class="code">${esc(app.room)}</strong>…</p>
+    ${statusLine(app, true)}
     <button class="btn ghost" data-act="leave">Cancel</button>
   </main>`;
 }
@@ -57,7 +85,7 @@ function connectingScreen(app) {
 function rejectedScreen(app) {
   return `
   <main class="screen center">
-    <h2>Can't join</h2>
+    <h2>Not connected</h2>
     <p>${esc(app.rejected)}</p>
     <button class="btn primary" data-act="leave">Back</button>
   </main>`;
@@ -100,9 +128,13 @@ function lobbyScreen(app) {
       <button class="btn ghost small" data-act="leave">Leave</button>
       <span>Room <strong class="code">${esc(app.room)}</strong></span>
     </header>
-    <section class="card">
+    ${statusLine(app)}
+    <section class="card join-card">
       <p class="muted center-text">Players join with this code</p>
       <p class="big-code">${esc(app.room)}</p>
+      ${isHost && !lobby.inGame ? `
+        <div class="qr" aria-label="QR code to join room ${esc(app.room)}">${qrSvg(app.joinLink)}</div>
+        <button class="btn small" data-act="share">Share the link</button>` : ''}
     </section>
     <section class="card">
       <h2>Players <span class="muted">${n}/${MAX_PLAYERS}</span></h2>
@@ -140,6 +172,7 @@ function gameScreen(app) {
       <span>${view.phase === 'GAME_OVER' ? 'Game over' : `Quest ${view.quest + 1} of 5`}</span>
       <span class="me">${esc(name(app.pid))}</span>
     </header>
+    ${statusLine(app)}
     ${questTrack(view)}
     ${view.phase === 'GAME_OVER' ? gameOver(app) : phaseCard(app)}
     ${playerList(app)}

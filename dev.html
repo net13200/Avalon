@@ -22,12 +22,21 @@
   <h1>Avalon test table</h1>
   <label>Players <select id="count"></select></label>
   <button id="open">New table</button>
-  <span>Every seat is a separate player connected over BroadcastChannel. Seat 1 hosts.</span>
+  <span id="mode"></span>
   <a href="index.html">Back to the app</a>
 </header>
 <main id="table"></main>
 <script>
   const NAMES = ['Ann', 'Ben', 'Cleo', 'Dan', 'Eve', 'Finn', 'Gil', 'Hana', 'Ido', 'Jo'];
+  // Seats talk over BroadcastChannel by default. ?net=peer uses real WebRTC; add
+  // &signal=localhost:9000 to use a local PeerJS server (npm run signal).
+  const page = new URLSearchParams(location.search);
+  const net = page.get('net') === 'peer'
+    ? (page.get('signal') ? { signal: page.get('signal') } : {})
+    : { net: 'local' };
+  document.getElementById('mode').textContent = net.net
+    ? 'Seats connect over BroadcastChannel. Seat 1 hosts.'
+    : `Seats connect over WebRTC via ${page.get('signal') || 'the public PeerJS server'}. Seat 1 hosts.`;
   const count = document.getElementById('count');
   for (let n = 5; n <= 10; n++) count.add(new Option(n, n, n === 7, n === 7));
 
@@ -37,7 +46,7 @@
     const table = document.getElementById('table');
     table.innerHTML = '';
     for (let i = 0; i < n; i++) {
-      const q = new URLSearchParams({ room, pid: `dev-${room}-${i}`, name: NAMES[i] });
+      const q = new URLSearchParams({ room, pid: `dev-${room}-${i}`, name: NAMES[i], ...net });
       if (i === 0) q.set('host', '1');
       table.insertAdjacentHTML('beforeend',
         `<figure><figcaption>Seat ${i + 1}: ${NAMES[i]}${i === 0 ? ' (host)' : ''}</figcaption>

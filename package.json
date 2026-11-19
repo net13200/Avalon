@@ -6,10 +6,14 @@
   "private": true,
   "scripts": {
     "test": "node --test",
-    "e2e": "node e2e/local.e2e.cjs",
-    "serve": "python3 -m http.server 8000"
+    "e2e": "node e2e/play.e2e.cjs",
+    "serve": "python3 -m http.server 8000",
+    "signal": "peerjs --port 9000 --path /"
   },
   "engines": {
     "node": ">=20"
+  },
+  "devDependencies": {
+    "peer": "^1.0.2"
   }
 }

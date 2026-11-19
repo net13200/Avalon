@@ -310,3 +310,18 @@ strong.evil { color: var(--evil); }
 .announce { font-weight: 700; padding: 8px 10px; border-radius: 10px; margin: 0 0 8px; }
 .announce.good { background: var(--good-bg); color: #cfe2ff; }
 .announce.evil { background: var(--evil-bg); color: #ffd6d6; }
+
+/* ---------- joining and connection status ---------- */
+
+.join-card { display: flex; flex-direction: column; align-items: center; gap: 8px; }
+.qr { width: min(220px, 70vw); aspect-ratio: 1; border-radius: 12px; overflow: hidden; background: #fff; }
+.qr svg { display: block; width: 100%; height: 100%; }
+.status {
+  margin: 0;
+  padding: 8px 12px;
+  border-radius: 10px;
+  background: #3a3420;
+  border: 1px solid var(--gold);
+  font-size: 0.9rem;
+}
+.status.plain { background: none; border: none; color: var(--muted); }

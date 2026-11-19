@@ -1,49 +1,77 @@
 // The app controller: identity, hosting or joining a room, and UI events.
+//
+// URL parameters:
+//   ?join=ABCD           prefill the room code (the link behind the lobby's QR code)
+//   ?net=local           connect tabs with BroadcastChannel instead of WebRTC (dev table)
+//   ?signal=host:port    use a self-run PeerJS server instead of the public one
+//   ?room=ABCD[&host=1]&pid=…&name=…   join or host straight away (dev table, tests)
 
 import { HostSession, C2H, H2C } from '../host.js';
 import { ACTIONS } from '../game.js';
 import { localHostTransport, localClientTransport } from '../net/local.js';
+import { peerHostTransport, peerClientTransport } from '../net/peer.js';
 import { CHARACTER_OPTIONS } from './text.js';
 import { render, pickMode } from './render.js';
 
 const root = document.getElementById('app');
 const params = new URLSearchParams(location.search);
+const LOCAL = params.get('net') === 'local';
+const SIGNAL = params.get('signal') ?? '';
 
 // ---------- storage (never throws) ----------
 
+// Local mode keeps identity per tab, so each tab is its own player. On a phone the
+// identity must survive closing the browser, so the game can be rejoined.
+const backing = () => (LOCAL ? sessionStorage : localStorage);
 const store = {
   get(key) {
-    try { return JSON.parse(sessionStorage.getItem(key)); } catch { return null; }
+    try { return JSON.parse(backing().getItem(key)); } catch { return null; }
   },
   set(key, value) {
-    try { sessionStorage.setItem(key, JSON.stringify(value)); } catch { /* private mode */ }
+    try { backing().setItem(key, JSON.stringify(value)); } catch { /* private mode */ }
   },
   remove(key) {
-    try { sessionStorage.removeItem(key); } catch { /* private mode */ }
+    try { backing().removeItem(key); } catch { /* private mode */ }
   },
 };
 
-function randomId() {
-  const b = new Uint8Array(8);
+function randomId(bytes = 8) {
+  const b = new Uint8Array(bytes);
   crypto.getRandomValues(b);
   return [...b].map((x) => x.toString(16).padStart(2, '0')).join('');
 }
 
-// Local test mode keeps identity per tab (sessionStorage), so each tab is its own player.
-// A ?pid= URL parameter overrides it, which the dev table uses for its iframes.
+// The player id is public (other players see it); the secret proves a device owns its seat.
+// A ?pid= URL parameter overrides the stored id, which the dev table uses for its frames.
 const pid = params.get('pid') ?? store.get('avalon.pid') ?? randomId();
 if (!params.get('pid')) store.set('avalon.pid', pid);
+const secretKey = `avalon.secret.${pid}`;
+const secret = store.get(secretKey) ?? randomId(16);
+store.set(secretKey, secret);
 
 const ROOM_LETTERS = 'ABCDEFGHJKLMNPQRSTUVWXYZ';
 const newRoomCode = () => Array.from({ length: 4 },
   () => ROOM_LETTERS[Math.floor(Math.random() * ROOM_LETTERS.length)]).join('');
+
+/** The link other players open (or scan) to join this room. */
+function joinLink(room) {
+  const url = new URL(location.pathname, location.origin);
+  url.searchParams.set('join', room);
+  if (LOCAL) url.searchParams.set('net', 'local');
+  if (SIGNAL) url.searchParams.set('signal', SIGNAL);
+  return url.href;
+}
 
 // ---------- app state ----------
 
 const app = {
   pid,
   name: params.get('name') ?? store.get('avalon.name') ?? '',
+  joinCode: (params.get('join') ?? '').toUpperCase().slice(0, 4),
   room: null,
+  isHost: false,
+  joinLink: null,
+  netStatus: null,
   lobby: null,
   view: null,
   picked: new Set(),
@@ -53,7 +81,7 @@ const app = {
   formError: null,
 };
 
-let conn = null; // { send(msg), close() }
+let conn = null; // { send(msg), close(), forget(), reconnectNow() }
 let toastTimer = null;
 const sessionKey = `avalon.session.${pid}`;
 
@@ -71,7 +99,7 @@ function showToast(text) {
 // ---------- connecting ----------
 
 function onHostMessage(msg) {
-  switch (msg.type) {
+  switch (msg?.type) {
     case H2C.LOBBY:
       update({ lobby: msg.lobby, view: null, picked: new Set() });
       break;
@@ -93,42 +121,80 @@ function onHostMessage(msg) {
   }
 }
 
-function hostRoom(room) {
+const hello = () => ({ type: C2H.HELLO, pid, secret, name: app.name });
+
+/** Host a room. `resumed` means this device hosted it before (e.g. a reload). */
+function hostRoom(room, resumed = false) {
   const snapKey = `avalon.host.${room}`;
+  const SELF = '@self';
+  let transport = null;
   const session = new HostSession({
     hostId: pid,
     saved: store.get(snapKey),
-    send: (to, msg) => (to === pid ? onHostMessage(msg) : transport.send(to, msg)),
+    send: (to, msg) => (to === SELF ? onHostMessage(msg) : transport.send(to, msg)),
+    drop: (to) => transport.drop(to),
   });
-  const transport = localHostTransport(room, (from, msg) => session.receive(from, msg));
   session.onChange = () => store.set(snapKey, session.snapshot());
+
+  const onStatus = (status) => {
+    if (status === 'room-taken') {
+      // Another host already uses this code: pick a fresh one.
+      transport.close();
+      store.remove(snapKey);
+      disconnect();
+      return hostRoom(newRoomCode());
+    }
+    update({ netStatus: status });
+  };
+  const opts = {
+    room,
+    signal: SIGNAL,
+    retryTaken: resumed,
+    onMessage: (from, msg) => session.receive(from, msg),
+    onClose: (from) => session.disconnected(from),
+    onStatus,
+  };
+  transport = LOCAL ? localHostTransport(opts) : peerHostTransport(opts);
+
   conn = {
-    send: (msg) => session.receive(pid, msg),
+    send: (msg) => session.receive(SELF, msg),
     close: () => transport.close(),
-    forget: () => store.remove(snapKey),
+    forget: () => { session.end(); store.remove(snapKey); },
+    reconnectNow: () => {},
   };
   store.set(sessionKey, { room, host: true });
-  update({ room, rejected: null });
-  conn.send({ type: C2H.HELLO, name: app.name });
+  update({ room, isHost: true, joinLink: joinLink(room), rejected: null, netStatus: 'connecting' });
+  conn.send(hello());
 }
 
 function joinRoom(room) {
   let heard = false;
-  const transport = localClientTransport(room, pid, (msg) => {
-    heard = true;
-    onHostMessage(msg);
-  });
-  // Keep saying hello until the host answers; it may not be open yet.
-  const hello = () => transport.send({ type: C2H.HELLO, name: app.name });
-  const retry = setInterval(() => (heard ? clearInterval(retry) : hello()), 1500);
+  let retry = null;
+  const opts = {
+    room,
+    signal: SIGNAL,
+    onMessage: (msg) => {
+      heard = true;
+      clearInterval(retry);
+      onHostMessage(msg);
+    },
+    // Say hello on every (re)connection. Locally the host may not be open yet, so repeat.
+    onOpen: () => {
+      transport.send(hello());
+      clearInterval(retry);
+      if (LOCAL) retry = setInterval(() => (heard ? clearInterval(retry) : transport.send(hello())), 1500);
+    },
+    onStatus: (status) => update({ netStatus: status }),
+  };
+  const transport = LOCAL ? localClientTransport(opts) : peerClientTransport(opts);
   conn = {
     send: transport.send,
     close: () => { clearInterval(retry); transport.close(); },
     forget: () => {},
+    reconnectNow: transport.reconnectNow,
   };
   store.set(sessionKey, { room, host: false });
-  update({ room, rejected: null });
-  hello();
+  update({ room, isHost: false, joinLink: joinLink(room), rejected: null, netStatus: 'connecting' });
 }
 
 function disconnect() {
@@ -139,9 +205,12 @@ function disconnect() {
 function leave() {
   conn?.send({ type: C2H.LEAVE });
   conn?.forget();
-  disconnect();
+  // Give the goodbye a moment to leave before the connection closes.
+  const closing = conn;
+  conn = null;
+  setTimeout(() => closing?.close(), 300);
   store.remove(sessionKey);
-  update({ room: null, lobby: null, view: null, rejected: null, picked: new Set() });
+  update({ room: null, lobby: null, view: null, rejected: null, netStatus: null, picked: new Set() });
 }
 
 const act = (action) => conn?.send({ type: C2H.ACTION, action });
@@ -153,8 +222,23 @@ function readHomeForm() {
   const name = form.name.value.trim();
   const code = form.code.value.trim().toUpperCase();
   app.name = name;
+  app.joinCode = code;
   store.set('avalon.name', name);
   return { name, code };
+}
+
+async function shareLink() {
+  const url = app.joinLink;
+  try {
+    if (navigator.share) {
+      await navigator.share({ title: 'Join my Avalon game', text: `Room ${app.room}`, url });
+      return;
+    }
+    await navigator.clipboard.writeText(url);
+    showToast('Link copied.');
+  } catch (e) {
+    if (e?.name !== 'AbortError') showToast(url);
+  }
 }
 
 function onAction(el) {
@@ -174,6 +258,7 @@ function onAction(el) {
       return joinRoom(code);
     }
     case 'leave': return leave();
+    case 'share': return shareLink();
     case 'seat-up': return conn.send({ type: C2H.MOVE_SEAT, playerId: id, delta: -1 });
     case 'seat-down': return conn.send({ type: C2H.MOVE_SEAT, playerId: id, delta: 1 });
     case 'kick': return conn.send({ type: C2H.KICK, playerId: id });
@@ -181,7 +266,7 @@ function onAction(el) {
     case 'new-game': return conn.send({ type: C2H.NEW_GAME });
     case 'pick': {
       const mode = pickMode(app.view, pid);
-      if (!mode) return;
+      if (!mode) return undefined;
       const picked = new Set(app.picked);
       if (picked.has(id)) picked.delete(id);
       else if (mode.max === 1) { picked.clear(); picked.add(id); }
@@ -196,6 +281,7 @@ function onAction(el) {
     case 'quest': return act({ type: ACTIONS.PLAY_QUEST_CARD, success: id === 'success' });
     case 'lady-examine': return act({ type: ACTIONS.LADY_EXAMINE, targetId: [...app.picked][0] });
     case 'assassinate': return act({ type: ACTIONS.ASSASSINATE, targetId: [...app.picked][0] });
+    default: return undefined;
   }
 }
 
@@ -204,13 +290,13 @@ function onToggle(el) {
   if (el.dataset.act === 'lady') {
     return conn.send({ type: C2H.SET_OPTIONS, options: { ladyOfTheLake: el.checked } });
   }
-  if (el.dataset.act !== 'character') return;
+  if (el.dataset.act !== 'character') return undefined;
   const on = new Set(CHARACTER_OPTIONS.filter((c) => c.roles.every((r) => lobby.options.roles.includes(r))).map((c) => c.key));
   if (el.checked) on.add(el.dataset.id); else on.delete(el.dataset.id);
   // Percival and Morgana need Merlin.
   for (const c of CHARACTER_OPTIONS) if (c.needs && !on.has(c.needs)) on.delete(c.key);
   const roles = CHARACTER_OPTIONS.filter((c) => on.has(c.key)).flatMap((c) => c.roles);
-  conn.send({ type: C2H.SET_OPTIONS, options: { roles } });
+  return conn.send({ type: C2H.SET_OPTIONS, options: { roles } });
 }
 
 root.addEventListener('click', (e) => {
@@ -248,18 +334,23 @@ window.addEventListener('keyup', (e) => {
   if (e.key === ' ' || e.key === 'Enter') hide();
 });
 
-// Tell the host when this device goes away; it rejoins with the same id.
-window.addEventListener('pagehide', () => conn?.send({ type: C2H.BYE }));
+// Phones drop connections while asleep; reconnect as soon as the page is visible again.
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') conn?.reconnectNow();
+  else hide();
+});
+// Local mode has no connection events, so say goodbye explicitly.
+window.addEventListener('pagehide', () => LOCAL && conn?.send({ type: C2H.BYE }));
 
 // ---------- start ----------
 
 const saved = store.get(sessionKey);
 if (params.get('room')) {
-  // Dev table and shared links: ?room=ABCD[&host=1]&name=…
   const room = params.get('room').toUpperCase();
-  if (params.get('host') === '1') hostRoom(room); else joinRoom(room);
+  if (params.get('host') === '1') hostRoom(room, Boolean(saved?.host && saved.room === room));
+  else joinRoom(room);
 } else if (saved?.room) {
-  if (saved.host) hostRoom(saved.room); else joinRoom(saved.room);
+  if (saved.host) hostRoom(saved.room, true); else joinRoom(saved.room);
 } else {
   update();
 }

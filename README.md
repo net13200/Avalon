@@ -8,21 +8,38 @@ The host's phone runs the game and holds the full state. The other phones connec
 
 1. ✅ **Rules engine and tests**: pure, framework-free game logic.
 2. ✅ **Local prototype**: the full app, played across browser tabs connected via `BroadcastChannel`.
-3. WebRTC host and join with a QR code and room code, and private views per phone.
-4. Reliability: reconnecting, recovering the host's state, wake lock, offline install.
+3. ✅ **WebRTC**: phones connect peer to peer, join with a room code or QR code, and rejoin after a reload.
+4. Reliability: detecting dead connections, wake lock, offline install.
 5. Polish: original art, sound, game history.
 6. Add a card to the SugiGames portal.
 
-## Try it
+## Playing on phones
+
+1. Put the app on any static HTTPS host, for example GitHub Pages. It has no build step and no server code.
+2. One player taps **Host a new game**. Their phone shows a 4-letter room code and a QR code.
+3. The others scan the QR code, or open the app and type the code. Players can sit together or play remotely; remote players will want a voice or video call alongside.
+4. The host's phone must stay open for the whole game, because it runs the game.
+
+A phone that reloads, sleeps or loses its connection rejoins its seat automatically. If the host's phone reloads, the game resumes from its saved state and the others reconnect. Someone who opens the link after the game has started is turned away.
+
+### How the connection works
+
+- **Finding each other:** the host's phone registers the room code (as the id `sugi-avalon-<code>`) with the free public [PeerJS](https://peerjs.com) server, and the others look it up there. That server only introduces the phones. It never sees game messages.
+- **Playing:** game messages travel over encrypted WebRTC data channels, directly between each player's phone and the host's. On networks that block direct connections, PeerJS's public TURN servers relay the encrypted traffic.
+- **Seat ownership:** each device keeps a random player id and a secret in `localStorage`. Other players can see the ids, but only the device holding a seat's secret can take that seat.
+- **Self-hosting:** if the public PeerJS server is ever down, run your own (`npm run signal`) and open the app with `?signal=your-host:port`.
+
+## Developing
 
 The page uses ES modules, so it must be served over HTTP rather than opened as a file:
 
 ```
+npm install            # only needed for the local PeerJS server and e2e tests
 npm run serve          # http://localhost:8000
 ```
 
-- **`dev.html`, the test table**: every seat of a 5–10 player game on one screen, each in its own frame. Seat 1 hosts. Use it to play a whole game yourself.
-- **`index.html`**: the real app. Host a game in one tab and join it from other tabs of the same browser with the room code. Until milestone 3, players can only connect within one browser.
+- **`dev.html`, the test table**: every seat of a 5–10 player game on one screen, each in its own frame. Seat 1 hosts. By default the frames talk over `BroadcastChannel`. For real WebRTC, run `npm run signal` and open `dev.html?net=peer&signal=localhost:9000`.
+- **`index.html`**: the real app. Add `?net=local` to connect tabs of one browser without WebRTC. Tabs of one browser share `localStorage`, so for WebRTC tests across tabs use the test table, which gives each frame its own player id.
 
 ### How a game plays
 
@@ -39,14 +56,16 @@ npm run serve          # http://localhost:8000
 | Path | What |
 |---|---|
 | `src/rules.js`, `src/game.js`, `src/view.js` | rules engine (below) |
-| `src/host.js` | `HostSession`: lobby, game state and messages. Doesn't depend on any network. |
-| `src/net/local.js` | `BroadcastChannel` transport. Milestone 3 adds a WebRTC transport with the same shape. |
+| `src/host.js` | `HostSession`: lobby, seats, game state and messages. Doesn't depend on any network. |
+| `src/net/peer.js` | WebRTC transport (PeerJS) with automatic reconnection |
+| `src/net/local.js` | `BroadcastChannel` transport for development, with the same interface |
 | `src/ui/` | `app.js` (wiring and events), `render.js` (HTML from state), `text.js` (English text) |
+| `vendor/` | PeerJS and a QR code generator, copied unmodified from npm (MIT) |
 | `dev.html` | the test table |
 
-The host's own player talks to its `HostSession` directly. Every other device sends `C2H` messages and receives `H2C` messages (see `src/host.js`). The host fills in `playerId` from the sender, so a device can't act as someone else.
+The host's own player talks to its `HostSession` directly. Every other device sends `C2H` messages and receives `H2C` messages (see `src/host.js`). A connection becomes a seat by saying hello with that seat's secret. The host then attributes every action to the connection's seat, so a device can't act as someone else.
 
-In local mode, every tab can technically read every message on the channel. Each WebRTC connection will only carry its own player's view.
+In local mode, every tab can technically read every message on the channel. Over WebRTC, each connection carries only its own player's messages.
 
 ## Rules engine
 
@@ -102,8 +121,9 @@ The tests use Node's built-in test runner (Node 20+), with no install needed. Th
 End to end:
 
 ```
-npm run e2e            # needs Playwright with Chromium
-SHOTS=shots npm run e2e   # also saves phone-sized screenshots of each phase
+npm run e2e              # needs Playwright with Chromium, and npm install
+NET=local npm run e2e    # BroadcastChannel only; NET=peer for WebRTC only
+SHOTS=shots npm run e2e  # also saves phone-sized screenshots of each phase
 ```
 
-This plays complete 5-, 7- and 10-player games in Chromium, with one page per player connected over `BroadcastChannel`.
+This plays complete games in Chromium, with one page per player. It runs them twice: once over `BroadcastChannel`, and once over real WebRTC through a local PeerJS server it starts itself. The WebRTC run also reloads a player's page and then the host's page mid-game and checks that everyone reconnects. Both runs check that a stranger can't join a game in progress.
