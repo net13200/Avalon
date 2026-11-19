@@ -11,7 +11,7 @@ The host's phone runs the game and holds the full state. The other phones connec
 3. ✅ **WebRTC**: phones connect peer to peer, join with a room code or QR code, and rejoin after a reload.
 4. ✅ **Reliability**: keepalive detection of dropped connections, screen wake lock, version check, installable PWA.
 5. ✅ **Polish**: original character emblems, synthesized sound and vibration, game history, rules sheet, reveal animations.
-6. Add a card to the SugiGames portal.
+6. ✅ **SugiGames portal**: a card on the "Game night" shelf of [SugiGames](https://github.com/net13200/SugiGames).
 
 ## Playing on phones
 
