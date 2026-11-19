@@ -37,7 +37,7 @@ export const ROLES = {
 export const SPECIAL_ROLES = ['merlin', 'assassin', 'percival', 'morgana', 'mordred', 'oberon'];
 
 export const DEFAULT_OPTIONS = Object.freeze({
-  roles: ['merlin', 'assassin'],
+  roles: ['merlin', 'assassin', 'percival', 'morgana'],
   ladyOfTheLake: false,
 });
 

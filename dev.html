@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Avalon Test Table</title>
+<style>
+  :root { color-scheme: dark; }
+  body { margin: 0; background: #0b0f1c; color: #ece6d6; font: 14px system-ui, sans-serif; }
+  header { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; padding: 10px 16px; border-bottom: 1px solid #34406a; }
+  header h1 { font-size: 1rem; margin: 0; }
+  header a { color: #d9b45a; }
+  select, button { font: inherit; padding: 6px 10px; border-radius: 8px; border: 1px solid #34406a; background: #1d2540; color: inherit; }
+  #table { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 12px; padding: 12px; }
+  figure { margin: 0; display: flex; flex-direction: column; gap: 4px; }
+  figcaption { color: #9aa3c0; }
+  iframe { width: 100%; height: 720px; border: 1px solid #34406a; border-radius: 16px; background: #141a2e; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Avalon test table</h1>
+  <label>Players <select id="count"></select></label>
+  <button id="open">New table</button>
+  <span>Every seat is a separate player connected over BroadcastChannel. Seat 1 hosts.</span>
+  <a href="index.html">Back to the app</a>
+</header>
+<main id="table"></main>
+<script>
+  const NAMES = ['Ann', 'Ben', 'Cleo', 'Dan', 'Eve', 'Finn', 'Gil', 'Hana', 'Ido', 'Jo'];
+  const count = document.getElementById('count');
+  for (let n = 5; n <= 10; n++) count.add(new Option(n, n, n === 7, n === 7));
+
+  function openTable() {
+    const n = Number(count.value);
+    const room = Array.from({ length: 4 }, () => 'ABCDEFGHJKLMNPQRSTUVWXYZ'[Math.floor(Math.random() * 24)]).join('');
+    const table = document.getElementById('table');
+    table.innerHTML = '';
+    for (let i = 0; i < n; i++) {
+      const q = new URLSearchParams({ room, pid: `dev-${room}-${i}`, name: NAMES[i] });
+      if (i === 0) q.set('host', '1');
+      table.insertAdjacentHTML('beforeend',
+        `<figure><figcaption>Seat ${i + 1}: ${NAMES[i]}${i === 0 ? ' (host)' : ''}</figcaption>
+         <iframe title="${NAMES[i]}" data-seat="${i}" src="index.html?${q}"></iframe></figure>`);
+    }
+  }
+  document.getElementById('open').addEventListener('click', openTable);
+  openTable();
+</script>
+</body>
+</html>
