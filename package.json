@@ -1,0 +1,13 @@
+{
+  "name": "avalon",
+  "version": "0.1.0",
+  "description": "Serverless multiplayer Avalon for phones: rules engine",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
